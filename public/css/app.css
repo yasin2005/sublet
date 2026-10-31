@@ -64,11 +64,18 @@ button, input, select { font: inherit; color: inherit; }
 }
 
 .brand {
-  font-size: 22px;
-  font-weight: 800;
-  letter-spacing: -0.04em;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.1;
   color: var(--ink);
   text-decoration: none;
+}
+.brand__name { font-size: 22px; font-weight: 800; letter-spacing: -0.04em; }
+.brand__tagline { font-size: 12px; font-weight: 500; color: var(--muted); white-space: nowrap; }
+
+/* Phones: the search box needs the width more than the tagline does. */
+@media (max-width: 900px) {
+  .brand__tagline { display: none; }
 }
 
 .searchbox {
