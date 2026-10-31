@@ -18,6 +18,8 @@
   --unknown:   #5c6b7e;   /* lease not published */
   --long:      #aeb8c5;   /* lease longer than a summer */
   --hot:       #f0b429;   /* hovered / selected pin */
+  --campus:    #4b3a8c;   /* university intern housing */
+  --campus-wash: #ece8f6;
 
   --topbar-h: 64px;
   --font: "Schibsted Grotesk", ui-sans-serif, system-ui, "Segoe UI", sans-serif;
@@ -278,15 +280,16 @@ button, input, select { font: inherit; color: inherit; }
 .dot--unknown { background: var(--surface); border: 2px solid var(--unknown); }
 .dot--long { background: var(--long); }
 
-/* Price pins. Leaflet sizes divIcons itself, so the pill is positioned to
-   centre over the point and its tail. */
-.pin { background: none; border: 0; }
+/* Price pins. Each is a MapLibre marker anchored at its bottom centre, so the
+   pill sits in normal flow and the 6px bottom margin is room for the tail —
+   the tail's tip is the exact point. MapLibre positions the .pin element with
+   its own transform, so only the inner span may be transformed. */
+.pin { cursor: pointer; }
 .pin span {
-  position: absolute;
-  bottom: 6px;
-  left: 0;
-  transform: translateX(-50%);
+  position: relative;
   display: block;
+  margin-bottom: 6px;
+  transform-origin: 50% 100%;
   padding: 2px 7px;
   border-radius: 6px;
   font: 700 12px/1.35 var(--font);
@@ -312,9 +315,20 @@ button, input, select { font: inherit; color: inherit; }
   color: var(--ink);
   border-color: var(--hot);
   border-top-color: var(--hot);
-  transform: translateX(-50%) scale(1.15);
+  transform: scale(1.15);
 }
 .pin.is-hot { z-index: 9999 !important; }
+
+/* MapTiler's free plan requires its logo; it sits above MapLibre's
+   attribution in the bottom-right corner. */
+.maptiler-logo {
+  position: absolute;
+  right: 10px;
+  bottom: 34px;
+  z-index: 2;
+  line-height: 0;
+}
+.maptiler-logo img { height: 22px; width: auto; }
 
 /* Zoomed out to a whole metro, hundreds of price labels pile into one blob.
    Below street level the pins shrink to dots in the same lease colours, and
@@ -322,7 +336,8 @@ button, input, select { font: inherit; color: inherit; }
 .map-pane.is-zoomed-out .pin:not(.is-hot) span {
   width: 11px; height: 11px;
   padding: 0;
-  bottom: -5px;
+  margin-bottom: 0;
+  transform: translateY(50%); /* centre the dot on the point, not above it */
   border-radius: 50%;
   font-size: 0;
   box-shadow: 0 0 0 1.5px #fff, 0 1px 3px rgba(21, 35, 59, 0.4);
@@ -546,4 +561,110 @@ button, input, select { font: inherit; color: inherit; }
 @media (prefers-reduced-motion: reduce) {
   .spinner, .skeleton .card__photo, .skeleton .bar { animation: none; }
   .pin span { transition: none; }
+}
+
+/* ── University intern housing ─────────────────────────────── */
+/* Its own hue, outside the three lease-fit tones, because a university
+   program is a different kind of thing: a program with rules, not a rental. */
+.pin--university span { background: var(--campus); color: #fff; border-top-color: var(--campus); }
+.dot--university { background: var(--campus); }
+
+.card__campus {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 2px;
+  padding: 14px;
+  background: linear-gradient(160deg, var(--campus) 0%, #2e2363 100%);
+  color: #fff;
+}
+.campus__kicker { font-size: 12px; font-weight: 600; opacity: 0.8; }
+.campus__name { font-size: 19px; font-weight: 800; letter-spacing: -0.02em; line-height: 1.2; }
+.campus__program { font-size: 14px; opacity: 0.9; }
+
+.eligibility {
+  font-size: 12px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: var(--campus-wash);
+  color: var(--campus);
+}
+.eligibility--restricted { background: #edf0f4; color: var(--muted); }
+
+.no-price { font-size: 16px; font-weight: 700; color: var(--muted); letter-spacing: 0; }
+
+.campus-hero {
+  padding: 28px 24px 22px;
+  background: linear-gradient(160deg, var(--campus) 0%, #2e2363 100%);
+  color: #fff;
+}
+.campus-hero__name { margin: 4px 0 0; font-size: 28px; font-weight: 800; letter-spacing: -0.03em; }
+.campus-hero__program { margin: 2px 0 0; font-size: 16px; opacity: 0.9; }
+.facts--wide { grid-template-columns: 1fr; }
+.facts--wide dd { max-width: 60%; }
+.side-card .eligibility { display: inline-block; margin-bottom: 10px; }
+.cta--quiet {
+  margin-top: 8px;
+  background: transparent;
+  color: var(--ink);
+  box-shadow: inset 0 0 0 1.5px var(--line);
+}
+.cta--quiet:hover { background: var(--paper); }
+
+/* ── Your internship: dates, office, commute ───────────────── */
+.pill--trip { border-color: var(--fit); color: var(--fit); }
+.pill--trip.is-set { background: var(--fit); border-color: var(--fit); color: #fff; }
+
+.range input[type="date"] { width: 150px; }
+.office-input {
+  width: 100%;
+  padding: 7px 9px;
+  border: 1.5px solid var(--line);
+  border-radius: 8px;
+}
+.panel__actions { display: flex; gap: 8px; margin-top: 14px; }
+.panel__actions .apply { margin-top: 0; flex: 1; }
+.clear {
+  border: 1.5px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 14px;
+  background: var(--surface);
+  font-weight: 600;
+  cursor: pointer;
+}
+.clear:hover { border-color: var(--ink-2); }
+#office-status:empty { display: none; }
+
+.card__commute { font-size: 13px; font-weight: 600; color: var(--fit); }
+
+.office-pin span {
+  display: block;
+  position: relative;
+  margin-bottom: 7px;
+  padding: 4px 9px;
+  border-radius: 7px;
+  background: var(--ink);
+  color: #fff;
+  font: 700 12px/1.3 var(--font);
+  white-space: nowrap;
+  box-shadow: 0 0 0 2px #fff, 0 3px 8px rgba(21, 35, 59, 0.45);
+}
+.office-pin span::after {
+  content: "";
+  position: absolute;
+  left: 50%; bottom: -6px;
+  margin-left: -6px;
+  border: 6px solid transparent;
+  border-bottom: 0;
+  border-top-color: var(--ink);
+}
+
+.commute__to { margin: -4px 0 8px; color: var(--muted); font-size: 14px; }
+.commute__links { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 10px 0 0; }
+.commute__links a { color: var(--fit); font-weight: 600; font-size: 14px; }
+
+@media (max-width: 900px) {
+  .range input[type="date"] { width: 100%; }
+  .range { flex-wrap: wrap; }
 }

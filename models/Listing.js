@@ -23,7 +23,13 @@ const listingSchema = new mongoose.Schema(
     },
 
     // ─── Financials ─────────────────────────────────────────────────────
-    pricePerMonth:     { type: Number, required: true },
+    // Required for every scraped source. University programs are the one
+    // exception: several publish no rate at all, and inventing one would be
+    // worse than saying "ask the university".
+    pricePerMonth: {
+      type: Number,
+      required: function () { return this.originalPlatform !== 'University'; },
+    },
     utilitiesIncluded: { type: Boolean, default: false },
     depositAmount:     { type: Number },
 
@@ -35,7 +41,7 @@ const listingSchema = new mongoose.Schema(
     },
     propertyType: {
       type: String,
-      enum: ['Apartment', 'House', 'Townhouse', 'Condo'],
+      enum: ['Apartment', 'House', 'Townhouse', 'Condo', 'Residence Hall'],
       required: true,
     },
     bedrooms:   { type: Number }, // nullable — unstructured sources often omit this; studios may report null
@@ -64,6 +70,24 @@ const listingSchema = new mongoose.Schema(
     amenitiesRaw: { type: [String], default: [] }, // fallback for non-normalized amenities
     listingUrl:   { type: String, required: true },
     images:       { type: [String], default: [] },
+
+    // ─── University housing programs (originalPlatform 'University') ────
+    // Curated in data/universityHousing.js. Kept as its own block because these
+    // are programs with rules, not listings: who may apply, which season the
+    // quoted rate is for, and the page it was checked against.
+    university: {
+      name:            { type: String },  // "University of Washington"
+      programName:     { type: String },  // "Seattle Intern Housing" — the intern program itself
+      season:          { type: String },  // "Summer 2027 — from June 20 …"
+      priceText:       { type: String },  // the rate exactly as the university quotes it
+      eligibility:     { type: String, enum: ['open', 'restricted'] },
+      eligibilityText: { type: String },
+      includes:        { type: [String], default: undefined },
+      terms:           { type: String },
+      applyUrl:        { type: String },
+      sourceUrl:       { type: String },
+      checkedOn:       { type: Date },
+    },
 
     // ─── Escape hatch: original scraped payload ─────────────────────────
     rawSource: { type: mongoose.Schema.Types.Mixed },

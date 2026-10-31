@@ -51,7 +51,11 @@ function ago(date) {
 //
 // So: prove the pipeline is alive before trusting staleness at all.
 async function pipelineIsAlive(maxStaleHours) {
-  const total = await Listing.countDocuments();
+  // Curated university programs are re-applied at every server boot, so their
+  // lastSeenAt proves nothing about the scrapers — counting them would let a
+  // dead pipeline look alive.
+  const scraped = { originalPlatform: { $ne: 'University' } };
+  const total = await Listing.countDocuments(scraped);
 
   // An empty database has no newest listing to check. Nothing to sweep either,
   // so this is a clean no-op rather than a failure.
@@ -59,7 +63,7 @@ async function pipelineIsAlive(maxStaleHours) {
     return { alive: false, empty: true, total, message: 'database is empty — nothing to sweep' };
   }
 
-  const [newest] = await Listing.find().sort({ lastSeenAt: -1 }).limit(1).select('lastSeenAt');
+  const [newest] = await Listing.find(scraped).sort({ lastSeenAt: -1 }).limit(1).select('lastSeenAt');
   const age = Date.now() - newest.lastSeenAt.getTime();
 
   if (age > maxStaleHours * HOUR_MS) {
@@ -104,7 +108,9 @@ async function run({ days, maxStaleHours, dryRun, force }) {
 
   const cutoff = new Date(Date.now() - days * DAY_MS);
 
-  const filter = { isActive: true, lastSeenAt: { $lt: cutoff } };
+  // University programs are curated, not scraped, so "not seen lately" says
+  // nothing about them. ingest/university.js is the only thing that retires one.
+  const filter = { isActive: true, lastSeenAt: { $lt: cutoff }, originalPlatform: { $ne: 'University' } };
   const candidates = await Listing.countDocuments(filter);
 
   console.log(`Pipeline alive — newest listing seen ${ago(health.newestSeenAt)}.`);

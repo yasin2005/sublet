@@ -26,7 +26,7 @@ const MAX_PINS = 500;
 const POLL_INTERVAL_MS = 3000;
 const POLL_TIMEOUT_MS = 150 * 1000;
 const SHORT_LEASE_DAYS = 92;   // "fits a summer" — matches the server's medium tier
-const US_CENTER = [39.5, -98.35];
+const US_CENTER = [-98.35, 39.5]; // [lng, lat], as MapLibre expects
 
 const $ = (id) => document.getElementById(id);
 const form = $('search-form');
@@ -49,6 +49,7 @@ const detailBody = $('detail-body');
 const FILTER_DEFAULTS = {
   maxLease: '', minPrice: '', maxPrice: '', minBedrooms: '',
   propertyType: '', spaceType: '', isFurnished: '', platform: '',
+  moveIn: '', moveOut: '', maxCommuteMiles: '',
 };
 
 const state = {
@@ -61,6 +62,7 @@ const state = {
   total: 0,
   totalPages: 1,
   updatedAt: null,     // when the city was last scraped, for "updated 3 hours ago"
+  office: null,        // { label, coordinates: [lng, lat] } — where the intern works
 };
 
 let epoch = 0;
@@ -85,8 +87,53 @@ function shortMoney(n) {
   return `$${k >= 10 ? Math.round(k) : k.toFixed(1).replace(/\.0$/, '')}K`;
 }
 
-const PLATFORM_NAMES = { FacebookMarketplace: 'Facebook Marketplace' };
+const PLATFORM_NAMES = { FacebookMarketplace: 'Facebook Marketplace', University: 'University intern housing' };
 const platformName = (p) => PLATFORM_NAMES[p] || p;
+
+const isUniversity = (l) => l.originalPlatform === 'University';
+
+// University programs may publish no rate; never print "$null".
+const priceHtml = (l, unit = '/mo') =>
+  l.pricePerMonth != null ? `${money(l.pricePerMonth)}<small>${unit}</small>` : '<span class="no-price">Rates not published</span>';
+
+// ─── Commute ───────────────────────────────────────────────────────────
+// The server returns straight-line distance to the office (_distanceKm).
+// Walk and bike times are ESTIMATES: straight-line distance stretched by a
+// typical street-grid detour, at steady walking and cycling speeds. Real
+// transit and driving times need a routing service with timetables, so the
+// detail view links out to Google Maps for those instead of guessing.
+const KM_PER_MILE = 1.609344;
+const DETOUR_FACTOR = 1.3;
+const WALK_KMH = 5;
+const BIKE_KMH = 15;
+
+const minutesAt = (km, kmh) => Math.max(1, Math.round((km * DETOUR_FACTOR / kmh) * 60));
+
+function milesText(km) {
+  const miles = km / KM_PER_MILE;
+  return miles < 10 ? `${miles.toFixed(1)} mi` : `${Math.round(miles)} mi`;
+}
+
+// One short phrase for a card: walking if it is a reasonable walk, else biking.
+function commuteSummary(km) {
+  const walk = minutesAt(km, WALK_KMH);
+  return walk <= 30
+    ? `${milesText(km)} to office, about ${walk} min walk`
+    : `${milesText(km)} to office, about ${minutesAt(km, BIKE_KMH)} min by bike`;
+}
+
+function haversineKm([lng1, lat1], [lng2, lat2]) {
+  const rad = Math.PI / 180;
+  const a = Math.sin(((lat2 - lat1) * rad) / 2) ** 2 +
+    Math.cos(lat1 * rad) * Math.cos(lat2 * rad) * Math.sin(((lng2 - lng1) * rad) / 2) ** 2;
+  return 2 * 6378.1 * Math.asin(Math.sqrt(Math.min(a, 1)));
+}
+
+function directionsUrl(l, mode) {
+  const [lng, lat] = l.location.coordinates;
+  const [oLng, oLat] = state.office.coordinates;
+  return `https://www.google.com/maps/dir/?api=1&origin=${lat},${lng}&destination=${oLat},${oLng}&travelmode=${mode}`;
+}
 
 function leaseFit(days) {
   if (days == null) return 'unknown';
@@ -131,14 +178,60 @@ const withPhotoSrcs = (l) => ({ ...l, images: (l.images || []).map(photoSrc) });
 const whereText = (l) => l.address || [l.city, l.zipCode].filter(Boolean).join(' ') || 'Exact location shared after booking';
 
 // ─── Map ───────────────────────────────────────────────────────────────
+// MapLibre GL with MapTiler vector tiles — the same stack Ohana runs. Vector
+// tiles keep labels sharp at every zoom and let the map glide rather than
+// step between zoom levels.
+//
+// The MapTiler key reaches the page from the server (.env MAPTILER_API_KEY).
+// It is a browser key by design: restrict it to your domains in the MapTiler
+// dashboard. Without one the map falls back to OpenStreetMap's raster tiles,
+// which are fine for local development but not allowed for a public site.
+//
+// NOTE: MapLibre zoom levels run one lower than Leaflet's for the same view
+// (512px tiles, not 256px), and every coordinate here is [lng, lat].
 
-const map = L.map('map', { zoomControl: true }).setView(US_CENTER, 4);
-L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-  maxZoom: 19,
-  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-}).addTo(map);
+const { maptilerKey = '', maptilerStyle = 'streets-v2' } = window.SUBLET_CONFIG || {};
 
-const pinLayer = L.layerGroup().addTo(map);
+const OSM_FALLBACK_STYLE = {
+  version: 8,
+  sources: {
+    osm: {
+      type: 'raster',
+      tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+      tileSize: 256,
+      maxzoom: 19,
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+    },
+  },
+  layers: [{ id: 'osm', type: 'raster', source: 'osm' }],
+};
+
+const map = new maplibregl.Map({
+  container: 'map',
+  style: maptilerKey
+    ? `https://api.maptiler.com/maps/${encodeURIComponent(maptilerStyle)}/style.json?key=${encodeURIComponent(maptilerKey)}`
+    : OSM_FALLBACK_STYLE,
+  center: US_CENTER,
+  zoom: 3,
+  dragRotate: false,      // a rental map has no use for bearing or pitch
+  pitchWithRotate: false,
+  touchPitch: false,
+  attributionControl: { compact: true },
+});
+map.touchZoomRotate.disableRotation();
+map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-left');
+
+// MapTiler's free plan requires its logo on the map.
+if (maptilerKey) {
+  const logo = document.createElement('a');
+  logo.className = 'maptiler-logo';
+  logo.href = 'https://www.maptiler.com';
+  logo.target = '_blank';
+  logo.rel = 'noopener';
+  logo.innerHTML = '<img src="https://api.maptiler.com/resources/logo.svg" alt="MapTiler">';
+  map.getContainer().appendChild(logo);
+}
+
 const markersById = new Map();
 
 function moveMapTo(fn) {
@@ -147,7 +240,7 @@ function moveMapTo(fn) {
 }
 
 // Prices only once the map is close enough to read them; see .is-zoomed-out.
-const PRICE_LABEL_MIN_ZOOM = 12;
+const PRICE_LABEL_MIN_ZOOM = 11;
 const mapPane = document.querySelector('.map-pane');
 const syncPinDetail = () => mapPane.classList.toggle('is-zoomed-out', map.getZoom() < PRICE_LABEL_MIN_ZOOM);
 map.on('zoomend', syncPinDetail);
@@ -155,32 +248,34 @@ syncPinDetail();
 
 function fitToPins() {
   if (markersById.size === 0) return;
-  const bounds = L.latLngBounds([...markersById.values()].map((m) => m.getLatLng()));
-  moveMapTo(() => map.fitBounds(bounds, { padding: [30, 30], maxZoom: 14, animate: false }));
+  const bounds = new maplibregl.LngLatBounds();
+  for (const marker of markersById.values()) bounds.extend(marker.getLngLat());
+  moveMapTo(() => map.fitBounds(bounds, { padding: 30, maxZoom: 13, animate: false }));
 }
 
 function renderPins(pins) {
-  pinLayer.clearLayers();
+  for (const marker of markersById.values()) marker.remove();
   markersById.clear();
 
   for (const pin of pins) {
     const [lng, lat] = pin.location?.coordinates || [];
     if (typeof lat !== 'number' || typeof lng !== 'number') continue;
 
-    const marker = L.marker([lat, lng], {
-      icon: L.divIcon({
-        className: `pin pin--${leaseFit(pin.minimumLeaseDays)}`,
-        html: `<span>${shortMoney(pin.pricePerMonth)}</span>`,
-        iconSize: [0, 0],
-      }),
-      keyboard: false,
-      // Confirmed short leases draw on top of everything else.
-      zIndexOffset: leaseFit(pin.minimumLeaseDays) === 'fit' ? 500 : 0,
+    const fit = leaseFit(pin.minimumLeaseDays);
+    const university = isUniversity(pin);
+    const el = document.createElement('div');
+    el.className = university ? 'pin pin--university' : `pin pin--${fit}`;
+    el.innerHTML = `<span>${pin.pricePerMonth != null ? shortMoney(pin.pricePerMonth) : 'Campus'}</span>`;
+    // University programs, then confirmed short leases, draw on top.
+    el.style.zIndex = university ? '3' : fit === 'fit' ? '2' : '1';
+    el.addEventListener('click', (event) => {
+      event.stopPropagation();
+      openDetail(pin._id);
     });
-    marker.on('click', () => openDetail(pin._id));
-    marker.on('mouseover', () => setHot(pin._id, true));
-    marker.on('mouseout', () => setHot(pin._id, false));
-    marker.addTo(pinLayer);
+    el.addEventListener('mouseenter', () => setHot(pin._id, true));
+    el.addEventListener('mouseleave', () => setHot(pin._id, false));
+
+    const marker = new maplibregl.Marker({ element: el, anchor: 'bottom' }).setLngLat([lng, lat]).addTo(map);
     markersById.set(pin._id, marker);
   }
 
@@ -190,6 +285,24 @@ function renderPins(pins) {
     fitPending = false;
     fitToPins();
   }
+}
+
+let officeMarker = null;
+
+function renderOfficeMarker() {
+  officeMarker?.remove();
+  officeMarker = null;
+  if (!state.office) return;
+
+  const el = document.createElement('div');
+  el.className = 'office-pin';
+  el.title = state.office.label;
+  el.innerHTML = '<span>Your office</span>';
+  // Above every listing pin, so it is never buried in a dense neighbourhood.
+  el.style.zIndex = '10';
+  officeMarker = new maplibregl.Marker({ element: el, anchor: 'bottom' })
+    .setLngLat(state.office.coordinates)
+    .addTo(map);
 }
 
 function setHot(id, on) {
@@ -225,7 +338,39 @@ searchArea.addEventListener('click', searchThisArea);
 
 // ─── Rendering the list ────────────────────────────────────────────────
 
+// Distance line, only once the intern has set an office.
+const commuteLine = (l) =>
+  l._distanceKm != null ? `<div class="card__commute">${escapeHtml(commuteSummary(l._distanceKm))}</div>` : '';
+
+// University programs have no photos and their value is in the rules — who
+// may apply and for which season — so they get their own card.
+function universityCardHtml(l) {
+  const u = l.university || {};
+  return `
+    <article class="card card--university" data-id="${escapeHtml(l._id)}" tabindex="0"
+             aria-label="${escapeHtml(u.programName)} at ${escapeHtml(u.name)}">
+      <div class="card__photo card__campus">
+        <span class="campus__kicker">University intern housing</span>
+        <span class="campus__name">${escapeHtml(u.name)}</span>
+        <span class="campus__program">${escapeHtml(u.programName)}</span>
+      </div>
+      <div class="card__body">
+        <div class="card__price">${priceHtml(l)}</div>
+        <div class="specs"><span>${escapeHtml(l.propertyType)}</span><span>${escapeHtml(l.spaceType)}</span></div>
+        <div class="card__addr">${escapeHtml(u.season || '')}</div>
+        ${commuteLine(l)}
+        <div class="card__foot">
+          <span class="eligibility eligibility--${escapeHtml(u.eligibility || 'open')}">
+            ${u.eligibility === 'restricted' ? 'Own students only' : 'Open to students from any college'}
+          </span>
+        </div>
+      </div>
+    </article>`;
+}
+
 function cardHtml(l) {
+  if (isUniversity(l)) return universityCardHtml(l);
+
   const images = l.images || [];
   const photo = images[0]
     ? `<img src="${escapeHtml(images[0])}" alt="" loading="lazy">
@@ -240,12 +385,13 @@ function cardHtml(l) {
 
   return `
     <article class="card" data-id="${escapeHtml(l._id)}" tabindex="0"
-             aria-label="${escapeHtml(money(l.pricePerMonth))} a month, ${escapeHtml(whereText(l))}">
+             aria-label="${escapeHtml(l.pricePerMonth != null ? `${money(l.pricePerMonth)} a month` : 'Price not listed')}, ${escapeHtml(whereText(l))}">
       <div class="card__photo">${photo}</div>
       <div class="card__body">
-        <div class="card__price">${money(l.pricePerMonth)}<small>/mo${extra}</small></div>
+        <div class="card__price">${priceHtml(l, `/mo${extra}`)}</div>
         ${specsHtml(l)}
         <div class="card__addr">${escapeHtml(whereText(l))}</div>
+        ${commuteLine(l)}
         <div class="card__foot">
           <span class="lease lease--${fit}">${leaseLabel(l.minimumLeaseDays)}</span>
           <span class="card__source">${escapeHtml(platformName(l.originalPlatform))}</span>
@@ -337,6 +483,15 @@ function queryFor({ pins = false, noFetch = true } = {}) {
   for (const key of ['minPrice', 'maxPrice', 'minBedrooms', 'propertyType', 'spaceType', 'isFurnished', 'platform']) {
     if (f[key]) q.set(key, f[key]);
   }
+  // Dates only as a pair; the server ignores half a stay.
+  if (f.moveIn && f.moveOut) {
+    q.set('moveIn', f.moveIn);
+    q.set('moveOut', f.moveOut);
+  }
+  if (state.office) {
+    q.set('office', state.office.coordinates.map((n) => n.toFixed(5)).join(','));
+    if (f.maxCommuteMiles) q.set('maxCommuteMiles', f.maxCommuteMiles);
+  }
 
   q.set('sort', state.sort);
   if (pins) {
@@ -403,7 +558,7 @@ async function runSearch({ fresh }) {
 
     if (fresh && !markersById.size && list.meta.search?.centroid) {
       const [lng, lat] = list.meta.search.centroid;
-      moveMapTo(() => map.setView([lat, lng], 11, { animate: false }));
+      moveMapTo(() => map.jumpTo({ center: [lng, lat], zoom: 10 }));
     }
 
     if (scraping) {
@@ -519,6 +674,12 @@ async function openDetail(id) {
     }
   }
 
+  // A listing opened from a pin was fetched on its own, without the search's
+  // _distanceKm, so work the distance out here — same formula as the server.
+  if (state.office && listing._distanceKm == null && listing.location?.coordinates) {
+    listing = { ...listing, _distanceKm: haversineKm(listing.location.coordinates, state.office.coordinates) };
+  }
+
   detailBody.innerHTML = detailHtml(listing);
   if (!detail.open) detail.showModal();
   detail.scrollTop = 0;
@@ -543,12 +704,85 @@ function galleryHtml(images) {
 
 const yesNo = (v) => (v ? 'Yes' : 'Not listed');
 
+// Availability and "checked on" values are calendar dates stored as UTC
+// midnight. Formatting them in the viewer's zone would show the day before
+// anywhere west of Greenwich — June 20 would read June 19 across the US.
 function formatDate(value) {
   if (!value) return null;
-  return new Date(value).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+  return new Date(value).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+}
+
+// Distance and estimates for any listing, once an office is set. Transit and
+// driving open in Google Maps, which has the timetables and traffic we lack.
+function commuteSectionHtml(l) {
+  if (!state.office || l._distanceKm == null || !l.location?.coordinates) return '';
+  const km = l._distanceKm;
+  return `
+    <h2>Commute to your office</h2>
+    <p class="commute__to">${escapeHtml(state.office.label)}</p>
+    <dl class="facts">
+      <div><dt>Distance</dt><dd>${milesText(km)} straight line</dd></div>
+      <div><dt>Walking</dt><dd>about ${minutesAt(km, WALK_KMH)} min</dd></div>
+      <div><dt>Biking</dt><dd>about ${minutesAt(km, BIKE_KMH)} min</dd></div>
+    </dl>
+    <p class="commute__links">
+      <a href="${escapeHtml(directionsUrl(l, 'transit'))}" target="_blank" rel="noopener noreferrer">Transit time on Google Maps</a>
+      <a href="${escapeHtml(directionsUrl(l, 'driving'))}" target="_blank" rel="noopener noreferrer">Driving time on Google Maps</a>
+    </p>
+    <p class="panel__note">Walk and bike times are estimates from distance.${l.address ? '' : ' This listing\'s location is approximate until you book.'}</p>`;
+}
+
+function universityDetailHtml(l) {
+  const u = l.university || {};
+  const checked = u.checkedOn ? formatDate(u.checkedOn) : null;
+  const facts = [
+    ['Season', u.season],
+    ['Rate', u.priceText],
+    ['Minimum stay', l.minimumLeaseDays ? `${l.minimumLeaseDays} nights` : 'Not stated'],
+    ['Room', `${l.spaceType}, ${l.propertyType.toLowerCase()}`],
+  ];
+
+  return `
+    <div class="campus-hero">
+      <span class="campus__kicker">University intern housing</span>
+      <p class="campus-hero__name" id="detail-price">${escapeHtml(u.name)}</p>
+      <p class="campus-hero__program">${escapeHtml(u.programName)}</p>
+    </div>
+    <div class="detail__main">
+      <div>
+        <p class="detail__price">${priceHtml(l)}</p>
+        <p class="detail__addr">${escapeHtml(l.address || '')}</p>
+
+        <h2>Who can apply</h2>
+        <p>${escapeHtml(u.eligibilityText || 'Not stated')}</p>
+
+        <h2>Program details</h2>
+        <dl class="facts facts--wide">
+          ${facts.map(([k, v]) => `<div><dt>${k}</dt><dd>${escapeHtml(v || 'Not stated')}</dd></div>`).join('')}
+        </dl>
+
+        ${u.includes?.length ? `
+          <h2>Included</h2>
+          <ul class="amenities">${u.includes.map((a) => `<li>${escapeHtml(a)}</li>`).join('')}</ul>` : ''}
+        ${u.terms ? `<h2>Booking terms</h2><p>${escapeHtml(u.terms)}</p>` : ''}
+
+        ${commuteSectionHtml(l)}
+      </div>
+
+      <aside class="side-card">
+        <span class="eligibility eligibility--${escapeHtml(u.eligibility || 'open')}">
+          ${u.eligibility === 'restricted' ? 'Own students only' : 'Open to students from any college'}
+        </span>
+        <p>Details are from the university's page${checked ? `, checked ${escapeHtml(checked)}` : ''}. Rates and dates change each year, so confirm before you apply.</p>
+        <a class="cta" href="${escapeHtml(u.applyUrl || u.sourceUrl)}" target="_blank" rel="noopener noreferrer">Apply on the university site</a>
+        <a class="cta cta--quiet" href="${escapeHtml(u.sourceUrl)}" target="_blank" rel="noopener noreferrer">Read the program page</a>
+      </aside>
+    </div>`;
 }
 
 function detailHtml(l) {
+  if (isUniversity(l)) return universityDetailHtml(l);
+
   const images = (l.images || []).slice(0, 40);
   const fit = leaseFit(l.minimumLeaseDays);
   const pets = [l.petsAllowed?.cats && 'Cats', l.petsAllowed?.dogsSmall && 'Small dogs', l.petsAllowed?.dogsLarge && 'Large dogs']
@@ -583,7 +817,7 @@ function detailHtml(l) {
     ${thumbs}
     <div class="detail__main">
       <div>
-        <p class="detail__price" id="detail-price">${money(l.pricePerMonth)}<small>/mo</small></p>
+        <p class="detail__price" id="detail-price">${priceHtml(l)}</p>
         <p class="detail__addr">${escapeHtml(whereText(l))}</p>
         ${specsHtml(l)}
 
@@ -595,6 +829,8 @@ function detailHtml(l) {
         ${amenities.length ? `
           <h2>Amenities</h2>
           <ul class="amenities">${amenities.map((a) => `<li>${escapeHtml(a)}</li>`).join('')}</ul>` : ''}
+
+        ${commuteSectionHtml(l)}
       </div>
 
       <aside class="side-card">
@@ -686,7 +922,14 @@ function pillLabels() {
 
   const moreCount = MORE_KEYS.filter((k) => f[k]).length;
 
+  const shortDate = (iso) => new Date(`${iso}T00:00:00`).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  const hasDates = Boolean(f.moveIn && f.moveOut);
+  let trip = 'Your internship';
+  if (hasDates) trip = `${shortDate(f.moveIn)} – ${shortDate(f.moveOut)}`;
+  if (state.office) trip = hasDates ? `${trip}, office set` : 'Office set';
+
   return {
+    trip:  [trip, hasDates || Boolean(state.office)],
     lease: [f.maxLease ? leaseNames[f.maxLease] : 'Lease', Boolean(f.maxLease)],
     price: [price, Boolean(f.minPrice || f.maxPrice)],
     beds:  [f.minBedrooms ? `${f.minBedrooms}+ beds` : 'Beds', Boolean(f.minBedrooms)],
@@ -711,8 +954,91 @@ function syncFilterUi() {
 
   $('minPrice').value = state.filters.minPrice;
   $('maxPrice').value = state.filters.maxPrice;
-  resetButton.hidden = activeFilterCount() === 0;
+  $('moveIn').value = state.filters.moveIn;
+  $('moveOut').value = state.filters.moveOut;
+  $('office').value = state.office?.label || '';
+
+  // "Closest to office" means nothing until there is an office.
+  const commuteOption = sortSelect.querySelector('option[value="commute"]');
+  commuteOption.hidden = !state.office;
+  if (!state.office && state.sort === 'commute') {
+    state.sort = 'best';
+    sortSelect.value = 'best';
+  }
+
+  resetButton.hidden = activeFilterCount() === 0 && !state.office;
 }
+
+// ─── Your internship: dates and office ─────────────────────────────────
+
+const officeStatus = $('office-status');
+
+// MapTiler's geocoder, biased toward wherever the map is looking, so "400
+// Broad St" finds the one in the city being searched.
+async function geocodeOffice(text) {
+  if (!maptilerKey) throw new Error('Office search needs MAPTILER_API_KEY in .env.');
+  const { lng, lat } = map.getCenter();
+  const url = `https://api.maptiler.com/geocoding/${encodeURIComponent(text)}.json` +
+    `?key=${encodeURIComponent(maptilerKey)}&limit=1&country=us&proximity=${lng},${lat}`;
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`Address lookup failed (${response.status}).`);
+  const feature = (await response.json()).features?.[0];
+  if (!feature) throw new Error(`Couldn't find "${text}". Try adding the city.`);
+  return { label: feature.place_name, coordinates: feature.center };
+}
+
+document.querySelector('[data-apply="trip"]').addEventListener('click', async () => {
+  const moveIn = $('moveIn').value;
+  const moveOut = $('moveOut').value;
+  if ((moveIn || moveOut) && !(moveIn && moveOut)) {
+    officeStatus.textContent = 'Add both a move-in and a move-out date.';
+    return;
+  }
+  if (moveIn && moveOut && moveOut <= moveIn) {
+    officeStatus.textContent = 'Move-out has to be after move-in.';
+    return;
+  }
+
+  const officeText = $('office').value.trim();
+  if (!officeText) {
+    state.office = null;
+  } else if (officeText !== state.office?.label) {
+    officeStatus.textContent = 'Finding your office…';
+    try {
+      state.office = await geocodeOffice(officeText);
+    } catch (error) {
+      officeStatus.textContent = error.message;
+      return;
+    }
+  }
+
+  officeStatus.textContent = state.office ? `Using ${state.office.label}` : '';
+  state.filters.moveIn = moveIn;
+  state.filters.moveOut = moveOut;
+  // Sorting by commute is the point of setting an office, so switch to it.
+  if (state.office && state.sort === 'best') {
+    state.sort = 'commute';
+    sortSelect.value = 'commute';
+  }
+  renderOfficeMarker();
+  closePanels();
+  applyFilters();
+});
+
+document.querySelector('[data-clear="trip"]').addEventListener('click', () => {
+  state.filters.moveIn = '';
+  state.filters.moveOut = '';
+  state.filters.maxCommuteMiles = '';
+  state.office = null;
+  officeStatus.textContent = '';
+  renderOfficeMarker();
+  closePanels();
+  applyFilters();
+});
+
+$('office').addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') document.querySelector('[data-apply="trip"]').click();
+});
 
 function closePanels(except) {
   document.querySelectorAll('.filter').forEach((el) => {
@@ -766,6 +1092,8 @@ document.querySelector('[data-apply="price"]').addEventListener('click', () => {
 
 resetButton.addEventListener('click', () => {
   state.filters = { ...FILTER_DEFAULTS };
+  state.office = null;
+  renderOfficeMarker();
   applyFilters();
 });
 
@@ -807,7 +1135,7 @@ form.addEventListener('submit', (event) => {
   state.updatedAt = null;
   searchArea.hidden = true;
   fitPending = true;
-  pinLayer.clearLayers();
+  for (const marker of markersById.values()) marker.remove();
   markersById.clear();
   runSearch({ fresh: true });
 });
@@ -818,6 +1146,10 @@ function syncUrl() {
   const q = new URLSearchParams();
   if (state.city) q.set('where', `${state.city}${state.state ? ', ' + state.state : ''}`);
   for (const [k, v] of Object.entries(state.filters)) if (v) q.set(k, v);
+  if (state.office) {
+    q.set('office', state.office.coordinates.map((n) => n.toFixed(5)).join(','));
+    q.set('officeLabel', state.office.label);
+  }
   if (state.sort !== 'best') q.set('sort', state.sort);
   if (state.page > 1) q.set('page', String(state.page));
   history.replaceState(null, '', q.toString() ? `?${q}` : location.pathname);
@@ -826,7 +1158,15 @@ function syncUrl() {
 function restoreFromUrl() {
   const q = new URLSearchParams(location.search);
   for (const key of Object.keys(FILTER_DEFAULTS)) state.filters[key] = q.get(key) || '';
-  state.sort = ['best', 'price', 'newest'].includes(q.get('sort')) ? q.get('sort') : 'best';
+
+  // A shared link carries the office as coordinates, so it needs no lookup.
+  const officePoint = (q.get('office') || '').split(',').map(Number);
+  if (officePoint.length === 2 && officePoint.every(Number.isFinite)) {
+    state.office = { label: q.get('officeLabel') || 'Your office', coordinates: officePoint };
+    renderOfficeMarker();
+  }
+
+  state.sort = ['best', 'price', 'newest', 'commute'].includes(q.get('sort')) ? q.get('sort') : 'best';
   sortSelect.value = state.sort;
   syncFilterUi();
 
@@ -844,7 +1184,7 @@ $('view-toggle').addEventListener('click', (event) => {
   layout.dataset.view = toMap ? 'map' : 'list';
   event.currentTarget.textContent = toMap ? 'List' : 'Map';
   if (toMap) {
-    map.invalidateSize();
+    map.resize();
     if (fitPending) {
       fitPending = false;
       fitToPins();

@@ -412,8 +412,34 @@ const LEASE_SHORT_DAYS = 31;
 const LEASE_MEDIUM_DAYS = 92;
 const FRESH_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
-function rankingStages() {
+// Great-circle distance in km from the office to each listing, computed in the
+// pipeline. $geoNear would do this natively, but it must be the first stage and
+// cannot be combined with the $geoWithin that radius and map-area search use.
+function distanceKmExpr([officeLng, officeLat]) {
+  const toRad = (v) => ({ $degreesToRadians: v });
+  const lng = { $arrayElemAt: ['$location.coordinates', 0] };
+  const lat = { $arrayElemAt: ['$location.coordinates', 1] };
+  const dLat = { $subtract: [toRad(lat), toRad(officeLat)] };
+  const dLng = { $subtract: [toRad(lng), toRad(officeLng)] };
+  const halfChord = {
+    $add: [
+      { $pow: [{ $sin: { $divide: [dLat, 2] } }, 2] },
+      { $multiply: [Math.cos(officeLat * Math.PI / 180), { $cos: toRad(lat) }, { $pow: [{ $sin: { $divide: [dLng, 2] } }, 2] }] },
+    ],
+  };
+  return { $multiply: [2 * EARTH_RADIUS_KM, { $asin: { $sqrt: { $min: [halfChord, 1] } } }] };
+}
+
+function rankingStages({ office } = {}) {
   return [
+    {
+      $addFields: {
+        // Programs that publish no price sort after every priced listing under
+        // "Price: low to high" — BSON puts null FIRST in an ascending sort.
+        _priceSort: { $ifNull: ['$pricePerMonth', Number.MAX_SAFE_INTEGER] },
+        ...(office ? { _distanceKm: distanceKmExpr(office) } : {}),
+      },
+    },
     {
       $addFields: {
         _leaseScore: {
@@ -452,10 +478,35 @@ function rankingStages() {
 // with equal scores can be returned in a different order per query, which makes
 // page 2 silently repeat or skip listings from page 1.
 const SORT_MODES = {
-  best:   { _score: -1, pricePerMonth: 1, _id: 1 },
-  price:  { pricePerMonth: 1, _id: 1 },
-  newest: { firstSeenAt: -1, _id: 1 },
+  best:    { _score: -1, _priceSort: 1, _id: 1 },
+  price:   { _priceSort: 1, _id: 1 },
+  newest:  { firstSeenAt: -1, _id: 1 },
+  // Only meaningful with ?office=; without it the route falls back to best.
+  commute: { _distanceKm: 1, _id: 1 },
 };
+
+// ?office=lng,lat — where the intern works. Validated here because it feeds
+// trigonometry in the pipeline, where a bad value fails the whole query.
+function parseOffice(raw) {
+  if (!raw) return null;
+  const point = String(raw).split(',').map(Number);
+  if (point.length !== 2 || !point.every(Number.isFinite)) return null;
+  const [lng, lat] = point;
+  return Math.abs(lng) <= 180 && Math.abs(lat) <= 90 ? point : null;
+}
+
+// ?moveIn=YYYY-MM-DD&moveOut=YYYY-MM-DD — the internship dates.
+function parseStay(moveIn, moveOut) {
+  const start = moveIn ? new Date(`${moveIn}T00:00:00Z`) : null;
+  const end = moveOut ? new Date(`${moveOut}T00:00:00Z`) : null;
+  if (!start || !end || Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end <= start) return null;
+  return { start, end, nights: Math.round((end - start) / (24 * 60 * 60 * 1000)) };
+}
+
+// Airbnb's availableFrom/availableTo are the 30-night window we SEARCHED, not
+// the host's real availability, so they say nothing about a stay months away.
+const PLATFORMS_WITHOUT_REAL_DATES = ['Airbnb'];
+const MILES_TO_KM = 1.609344;
 
 // ─── Query building ────────────────────────────────────────────────────
 // ?bounds=west,south,east,north in degrees. Rejected rather than clamped when
@@ -475,7 +526,7 @@ function parseBounds(raw) {
 // so it must not haul images and amenity arrays for hundreds of listings.
 const PIN_PROJECTION = {
   _id: 1, location: 1, pricePerMonth: 1, minimumLeaseDays: 1, bedrooms: 1,
-  spaceType: 1, originalPlatform: 1, _score: 1,
+  spaceType: 1, originalPlatform: 1, _score: 1, _distanceKm: 1,
 };
 const MAX_PINS = 500;
 
@@ -536,6 +587,21 @@ function buildQuery(params, location, centroid, radiusKm) {
           { minimumLeaseDays: null },
         ],
       },
+    ];
+  }
+
+  // Internship dates. A listing fits when it is free by move-in, stays free
+  // through move-out, and its minimum stay is no longer than the internship.
+  // As with lease length, an unknown value never excludes a listing — most
+  // sources publish no end date, and hiding them would empty the results.
+  const stay = parseStay(params.moveIn, params.moveOut);
+  if (stay) {
+    const realDates = { originalPlatform: { $in: PLATFORMS_WITHOUT_REAL_DATES } };
+    query.$and = [
+      ...(query.$and || []),
+      { $or: [realDates, { availableFrom: { $lte: stay.start } }, { availableFrom: null }] },
+      { $or: [realDates, { availableTo: { $gte: stay.end } }, { availableTo: null }] },
+      { $or: [{ minimumLeaseDays: { $lte: stay.nights } }, { minimumLeaseDays: null }] },
     ];
   }
 
@@ -681,7 +747,15 @@ router.get('/', async (req, res) => {
 
     const query = buildQuery(req.query, location, centroid, radiusKm);
 
-    const sort = SORT_MODES[req.query.sort] || SORT_MODES.best;
+    // Commute: distance from the intern's office, optional cap in miles.
+    const office = parseOffice(req.query.office);
+    const maxCommuteMiles = Number(req.query.maxCommuteMiles);
+    const commuteStages = office && maxCommuteMiles > 0
+      ? [{ $match: { _distanceKm: { $lte: maxCommuteMiles * MILES_TO_KM } } }]
+      : [];
+
+    const sortName = req.query.sort === 'commute' && !office ? 'best' : req.query.sort;
+    const sort = SORT_MODES[sortName] || SORT_MODES.best;
     const page = Math.max(Number(req.query.page) || 1, 1);
     const skip = (page - 1) * limit;
 
@@ -689,7 +763,8 @@ router.get('/', async (req, res) => {
     // costs a single round trip rather than a query plus a countDocuments.
     const [facet] = await Listing.aggregate([
       { $match: query },
-      ...rankingStages(),
+      ...rankingStages({ office }),
+      ...commuteStages,
       {
         $facet: {
           rows: [
@@ -698,7 +773,7 @@ router.get('/', async (req, res) => {
             { $limit: limit },
             // rawSource is the entire original scraped payload — tens of KB per
             // listing. It has no business crossing the wire to a browser.
-            { $project: pinsView ? PIN_PROJECTION : { rawSource: 0, _leaseScore: 0, _freshScore: 0 } },
+            { $project: pinsView ? PIN_PROJECTION : { rawSource: 0, _leaseScore: 0, _freshScore: 0, _priceSort: 0 } },
           ],
           total: [{ $count: 'n' }],
         },
@@ -708,7 +783,7 @@ router.get('/', async (req, res) => {
     const listings = facet.rows;
     const total = facet.total[0]?.n || 0;
 
-    meta.sort = req.query.sort && SORT_MODES[req.query.sort] ? req.query.sort : 'best';
+    meta.sort = sortName && SORT_MODES[sortName] ? sortName : 'best';
     meta.page = {
       page,
       limit,

@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;500;600;700;800&display=swap">
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css">
   <link rel="stylesheet" href="/css/app.css">
 </head>
 <body>
@@ -26,6 +26,36 @@
 
     <!-- Filter pills. Each opens a small panel; the pill label shows what is set. -->
     <nav class="filters" aria-label="Filters">
+      <!-- The intern's own trip: dates and where they will work. -->
+      <div class="filter" data-filter="trip">
+        <button type="button" class="pill pill--trip" aria-expanded="false">Your internship</button>
+        <div class="panel panel--wide" hidden>
+          <p class="panel__title">Internship dates</p>
+          <div class="range">
+            <label>Move in<input type="date" id="moveIn"></label>
+            <label>Move out<input type="date" id="moveOut"></label>
+          </div>
+          <p class="panel__note">Hides places that aren't free for your whole stay or need a longer minimum. Listings that don't say stay in.</p>
+
+          <p class="panel__title">Office address</p>
+          <input type="text" id="office" class="office-input" placeholder="e.g. 400 Broad St, Seattle" autocomplete="street-address">
+          <p id="office-status" class="panel__note" role="status"></p>
+
+          <p class="panel__title">Max distance to office</p>
+          <div class="choices choices--row" data-name="maxCommuteMiles">
+            <button type="button" data-value="">Any</button>
+            <button type="button" data-value="2">2 mi</button>
+            <button type="button" data-value="5">5 mi</button>
+            <button type="button" data-value="10">10 mi</button>
+          </div>
+
+          <div class="panel__actions">
+            <button type="button" class="apply" data-apply="trip">Apply</button>
+            <button type="button" class="clear" data-clear="trip">Clear</button>
+          </div>
+        </div>
+      </div>
+
       <div class="filter" data-filter="lease">
         <button type="button" class="pill" aria-expanded="false">Lease</button>
         <div class="panel" hidden>
@@ -76,6 +106,7 @@
             <button type="button" data-value="House">House</button>
             <button type="button" data-value="Townhouse">Townhouse</button>
             <button type="button" data-value="Condo">Condo</button>
+            <button type="button" data-value="Residence Hall">Residence hall</button>
           </div>
         </div>
       </div>
@@ -98,6 +129,7 @@
           <p class="panel__title">Listed on</p>
           <div class="choices choices--row" data-name="platform">
             <button type="button" data-value="">All sites</button>
+            <button type="button" data-value="University">University intern housing</button>
             <button type="button" data-value="Zillow">Zillow</button>
             <button type="button" data-value="Redfin">Redfin</button>
             <button type="button" data-value="Airbnb">Airbnb</button>
@@ -125,6 +157,7 @@
         <span><i class="dot dot--fit"></i>Lease of 3 months or less</span>
         <span><i class="dot dot--unknown"></i>Lease not listed</span>
         <span><i class="dot dot--long"></i>Longer lease</span>
+        <span><i class="dot dot--university"></i>University intern housing</span>
       </div>
     </section>
 
@@ -139,6 +172,7 @@
               <option value="best">Best for short stays</option>
               <option value="price">Price: low to high</option>
               <option value="newest">Newest</option>
+              <option value="commute" hidden>Closest to office</option>
             </select>
           </label>
         </div>
@@ -164,7 +198,9 @@
     <div id="detail-body"></div>
   </dialog>
 
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></script>
+  <%# Map settings from .env, set by server.js. Every value here is public. %>
+  <script>window.SUBLET_CONFIG = <%- JSON.stringify(mapConfig).replace(/</g, '\\u003c') %>;</script>
   <script src="/js/app.js"></script>
 </body>
 </html>

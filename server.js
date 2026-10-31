@@ -4,6 +4,7 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 const path = require('path');
 const { resetStuckFetches } = require('./lib/bootCleanup');
+const { syncUniversityHousing } = require('./ingest/university');
 
 const app = express();
 app.use(cors());
@@ -16,7 +17,14 @@ app.set('view engine', 'ejs');
 app.set('views', path.join(__dirname, 'views'));
 app.use(express.static(path.join(__dirname, 'public')));
 
-app.get('/', (req, res) => res.render('index'));
+// Only what the browser needs for the map. Never pass other .env values here:
+// everything in mapConfig is readable by every visitor.
+const mapConfig = {
+  maptilerKey: process.env.MAPTILER_API_KEY || '',
+  maptilerStyle: process.env.MAPTILER_STYLE || 'streets-v2',
+};
+
+app.get('/', (req, res) => res.render('index', { mapConfig }));
 
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 app.use('/api/listings', require('./routes/listings'));
@@ -53,6 +61,12 @@ mongoose
     // no longer exists. Never fatal: a failed cleanup should not stop the API.
     await resetStuckFetches().catch((err) =>
       console.error('Boot cleanup failed (continuing):', err.message)
+    );
+
+    // Curated summer intern housing programs (data/universityHousing.js).
+    // Local data, so it is cheap to re-apply on every boot; never fatal.
+    await syncUniversityHousing({ quiet: true }).catch((err) =>
+      console.error('University housing sync failed (continuing):', err.message)
     );
 
     app.listen(PORT, () => console.log(`Server listening on ${PORT}`));
