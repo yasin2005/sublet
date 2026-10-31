@@ -1,0 +1,549 @@
+/* Sublet — map + list rental search.
+ *
+ * One idea carries the visual identity: lease fit. Pins, chips and the legend
+ * all use the same three tones, so "can I rent this for a summer?" reads at a
+ * glance from the map before any card is opened. Everything else stays quiet.
+ */
+
+:root {
+  --paper:     #f5f7f9;
+  --surface:   #ffffff;
+  --line:      #dde3ea;
+  --ink:       #15233b;
+  --ink-2:     #3d4b60;
+  --muted:     #6a788b;
+
+  --fit:       #0b7a68;   /* confirmed short lease */
+  --fit-wash:  #def1ec;
+  --unknown:   #5c6b7e;   /* lease not published */
+  --long:      #aeb8c5;   /* lease longer than a summer */
+  --hot:       #f0b429;   /* hovered / selected pin */
+
+  --topbar-h: 64px;
+  --font: "Schibsted Grotesk", ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+}
+
+* { box-sizing: border-box; }
+/* Component display rules must never resurrect an element marked hidden. */
+[hidden] { display: none !important; }
+html, body { height: 100%; }
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink-2);
+  font: 15px/1.5 var(--font);
+  -webkit-font-smoothing: antialiased;
+  display: flex;
+  flex-direction: column;
+}
+
+button, input, select { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--fit); outline-offset: 2px; }
+
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip: rect(0 0 0 0); white-space: nowrap;
+}
+
+/* ── Top bar ───────────────────────────────────────────────── */
+.topbar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 20px;
+  min-height: var(--topbar-h);
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  position: relative;
+  z-index: 1000; /* panels must sit above Leaflet's panes */
+  flex-wrap: wrap;
+}
+
+.brand {
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: -0.04em;
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.searchbox {
+  display: flex;
+  flex: 0 1 340px;
+  border: 1.5px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  overflow: hidden;
+}
+.searchbox:focus-within { border-color: var(--ink); }
+.searchbox input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  padding: 9px 12px;
+  background: transparent;
+  outline: none;
+}
+.searchbox button {
+  border: 0;
+  background: transparent;
+  padding: 0 12px;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.filters { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.filter { position: relative; }
+
+.pill {
+  border: 1.5px solid var(--line);
+  background: var(--surface);
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-weight: 600;
+  font-size: 14px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.pill:hover { border-color: var(--ink-2); }
+.pill[aria-expanded="true"] { border-color: var(--ink); }
+.pill.is-set { background: var(--ink); border-color: var(--ink); color: #fff; }
+
+.panel {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  min-width: 240px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 14px 36px -14px rgba(21, 35, 59, 0.35);
+  padding: 14px 16px 16px;
+}
+.panel--wide { min-width: 340px; }
+.panel__title { margin: 0 0 8px; font-weight: 700; color: var(--ink); font-size: 14px; }
+.panel__title:not(:first-child) { margin-top: 14px; }
+.panel__note { margin: 10px 0 0; font-size: 12.5px; color: var(--muted); max-width: 30ch; }
+
+.choices { display: flex; flex-direction: column; gap: 4px; }
+.choices--row { flex-direction: row; flex-wrap: wrap; gap: 6px; }
+.choices button {
+  text-align: left;
+  border: 1.5px solid var(--line);
+  background: var(--surface);
+  border-radius: 8px;
+  padding: 6px 11px;
+  cursor: pointer;
+  font-size: 14px;
+}
+.choices button:hover { border-color: var(--ink-2); }
+.choices button[aria-pressed="true"] { border-color: var(--ink); background: var(--ink); color: #fff; }
+
+.range { display: flex; gap: 10px; }
+.range label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
+.range input {
+  width: 110px;
+  padding: 7px 9px;
+  border: 1.5px solid var(--line);
+  border-radius: 8px;
+}
+.apply {
+  margin-top: 12px;
+  width: 100%;
+  border: 0;
+  border-radius: 8px;
+  padding: 8px;
+  background: var(--ink);
+  color: #fff;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.reset {
+  border: 0;
+  background: none;
+  color: var(--fit);
+  font-weight: 600;
+  cursor: pointer;
+  padding: 6px 4px;
+}
+.reset:hover { text-decoration: underline; }
+
+/* ── Split layout ──────────────────────────────────────────── */
+.layout {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(400px, 46%);
+}
+
+.map-pane { position: relative; min-height: 0; }
+#map { position: absolute; inset: 0; background: #e8edf1; }
+
+.list-pane {
+  overflow-y: auto;
+  background: var(--paper);
+  border-left: 1px solid var(--line);
+  padding: 18px 20px 40px;
+}
+
+.list-head h1 {
+  margin: 0;
+  font-size: 22px;
+  line-height: 1.25;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+}
+.list-head__row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin: 4px 0 14px;
+}
+.summary { margin: 0; color: var(--muted); font-size: 14px; }
+.summary strong { color: var(--ink); }
+
+.sort select {
+  border: 0;
+  background: transparent;
+  font-weight: 600;
+  color: var(--ink);
+  cursor: pointer;
+  padding: 4px 0;
+}
+
+.progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+  font-size: 14px;
+}
+.spinner {
+  width: 14px; height: 14px;
+  flex: none;
+  border: 2px solid var(--line);
+  border-top-color: var(--fit);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── Map overlays ──────────────────────────────────────────── */
+.move-search, .search-area, .legend {
+  position: absolute;
+  z-index: 500;
+  background: var(--surface);
+  border-radius: 10px;
+  box-shadow: 0 4px 14px -6px rgba(21, 35, 59, 0.4);
+}
+.move-search {
+  top: 14px; left: 56px;
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 12px;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--ink);
+  cursor: pointer;
+}
+.move-search input { accent-color: var(--fit); margin: 0; }
+
+.search-area {
+  top: 14px; left: 50%;
+  transform: translateX(-50%);
+  border: 0;
+  padding: 8px 16px;
+  font-weight: 700;
+  color: #fff;
+  background: var(--ink);
+  cursor: pointer;
+}
+
+.legend {
+  bottom: 22px; left: 12px;
+  display: flex; flex-direction: column; gap: 3px;
+  padding: 8px 12px;
+  font-size: 12.5px;
+}
+.legend span { display: flex; align-items: center; gap: 7px; }
+.dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+.dot--fit { background: var(--fit); }
+.dot--unknown { background: var(--surface); border: 2px solid var(--unknown); }
+.dot--long { background: var(--long); }
+
+/* Price pins. Leaflet sizes divIcons itself, so the pill is positioned to
+   centre over the point and its tail. */
+.pin { background: none; border: 0; }
+.pin span {
+  position: absolute;
+  bottom: 6px;
+  left: 0;
+  transform: translateX(-50%);
+  display: block;
+  padding: 2px 7px;
+  border-radius: 6px;
+  font: 700 12px/1.35 var(--font);
+  white-space: nowrap;
+  cursor: pointer;
+  box-shadow: 0 2px 5px rgba(21, 35, 59, 0.3);
+  transition: transform 0.12s;
+}
+.pin span::after {
+  content: "";
+  position: absolute;
+  left: 50%; bottom: -5px;
+  margin-left: -5px;
+  border: 5px solid transparent;
+  border-bottom: 0;
+  border-top-color: inherit;
+}
+.pin--fit span     { background: var(--fit); color: #fff; border-top-color: var(--fit); }
+.pin--unknown span { background: var(--surface); color: var(--ink); border: 1.5px solid var(--unknown); border-top-color: var(--unknown); }
+.pin--long span    { background: var(--long); color: var(--ink); border-top-color: var(--long); }
+.pin.is-hot span {
+  background: var(--hot);
+  color: var(--ink);
+  border-color: var(--hot);
+  border-top-color: var(--hot);
+  transform: translateX(-50%) scale(1.15);
+}
+.pin.is-hot { z-index: 9999 !important; }
+
+/* Zoomed out to a whole metro, hundreds of price labels pile into one blob.
+   Below street level the pins shrink to dots in the same lease colours, and
+   the hovered one still pops back to a full price. */
+.map-pane.is-zoomed-out .pin:not(.is-hot) span {
+  width: 11px; height: 11px;
+  padding: 0;
+  bottom: -5px;
+  border-radius: 50%;
+  font-size: 0;
+  box-shadow: 0 0 0 1.5px #fff, 0 1px 3px rgba(21, 35, 59, 0.4);
+}
+.map-pane.is-zoomed-out .pin:not(.is-hot) span::after { display: none; }
+
+/* ── Cards ─────────────────────────────────────────────────── */
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 14px;
+}
+
+.card {
+  background: var(--surface);
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1.5px solid var(--line);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+}
+.card:hover, .card.is-hot { border-color: var(--ink); }
+
+/* flex: none + an absolutely placed image, or a tall photo's intrinsic height
+   would override the aspect ratio and the cards in a row would not line up. */
+.card__photo { position: relative; flex: none; aspect-ratio: 16 / 10; overflow: hidden; background: #e4e9ee; }
+.card__photo img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
+.card__photo .none { display: grid; place-items: center; height: 100%; color: var(--muted); font-size: 13px; }
+.card__count {
+  position: absolute; right: 8px; bottom: 8px;
+  background: rgba(21, 35, 59, 0.72); color: #fff;
+  font-size: 12px; padding: 1px 7px; border-radius: 6px;
+}
+.card__nav {
+  position: absolute; top: 50%; transform: translateY(-50%);
+  width: 28px; height: 28px; border-radius: 50%;
+  border: 0; background: rgba(255,255,255,0.92); color: var(--ink);
+  cursor: pointer; opacity: 0; font-size: 16px; line-height: 1;
+  box-shadow: 0 1px 4px rgba(21,35,59,0.3);
+}
+.card__nav--prev { left: 8px; }
+.card__nav--next { right: 8px; }
+.card:hover .card__nav, .card__nav:focus-visible { opacity: 1; }
+
+.card__body { padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 3px; }
+.card__price {
+  font-size: 21px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+}
+.card__price small { font-size: 13px; font-weight: 500; color: var(--muted); letter-spacing: 0; }
+.specs { display: flex; flex-wrap: wrap; gap: 0 12px; font-size: 14px; color: var(--ink); }
+.specs b { font-weight: 700; }
+.card__addr {
+  font-size: 13.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.card__foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 6px; }
+.card__source { font-size: 12px; color: var(--muted); }
+
+.lease {
+  font-size: 12px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 6px;
+  white-space: nowrap;
+}
+.lease--fit     { background: var(--fit-wash); color: var(--fit); }
+.lease--unknown { background: transparent; color: var(--unknown); box-shadow: inset 0 0 0 1.5px var(--line); }
+.lease--long    { background: #edf0f4; color: var(--muted); }
+
+.skeleton { pointer-events: none; }
+.skeleton .card__photo, .skeleton .bar {
+  background: linear-gradient(90deg, #e6ebf0 0%, #f1f4f7 50%, #e6ebf0 100%);
+  background-size: 200% 100%;
+  animation: shimmer 1.3s linear infinite;
+}
+.skeleton .bar { height: 12px; border-radius: 4px; margin: 6px 0; }
+@keyframes shimmer { to { background-position: -200% 0; } }
+
+.empty { padding: 30px 4px; color: var(--muted); max-width: 52ch; }
+.empty strong { color: var(--ink); display: block; margin-bottom: 4px; font-size: 16px; }
+
+/* ── Pagination ────────────────────────────────────────────── */
+.pager { display: flex; justify-content: center; gap: 6px; padding: 24px 0 8px; flex-wrap: wrap; }
+.pager button {
+  min-width: 36px; height: 36px;
+  border-radius: 50%;
+  border: 0;
+  background: transparent;
+  font-weight: 600;
+  cursor: pointer;
+  color: var(--ink);
+}
+.pager button:hover:not(:disabled) { background: #e7ecf1; }
+.pager button[aria-current="page"] { background: var(--ink); color: #fff; }
+.pager button:disabled { opacity: 0.35; cursor: default; }
+.pager span { align-self: center; color: var(--muted); }
+
+/* ── Detail dialog ─────────────────────────────────────────── */
+.detail {
+  width: min(880px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  padding: 0;
+  border: 0;
+  border-radius: 14px;
+  background: var(--surface);
+  color: var(--ink-2);
+  overflow-y: auto;
+}
+.detail::backdrop { background: rgba(21, 35, 59, 0.55); }
+.detail__close {
+  position: sticky; top: 12px; float: right; margin: 12px 12px -48px 0;
+  z-index: 2;
+  width: 36px; height: 36px; border-radius: 50%;
+  border: 0; background: var(--surface); color: var(--ink);
+  box-shadow: 0 2px 8px rgba(21,35,59,0.3);
+  cursor: pointer;
+  display: grid; place-items: center;
+}
+
+/* Explicit row + overflow: without them a tall photo sizes the implicit row
+   and the gallery spills over the whole dialog. */
+.gallery { display: grid; grid-template-columns: 2fr 1fr; grid-template-rows: minmax(0, 1fr); gap: 4px; height: 360px; overflow: hidden; background: #e4e9ee; }
+.gallery > * { min-width: 0; min-height: 0; }
+.gallery img { width: 100%; height: 100%; object-fit: cover; display: block; cursor: zoom-in; }
+.gallery__side { display: grid; grid-template-rows: 1fr 1fr; gap: 4px; min-height: 0; }
+.gallery__side > * { min-height: 0; }
+.gallery--single { grid-template-columns: 1fr; }
+.gallery .none { display: grid; place-items: center; color: var(--muted); }
+
+.thumbs { display: flex; gap: 6px; overflow-x: auto; padding: 8px 24px 0; }
+.thumbs button { flex: none; border: 2px solid transparent; padding: 0; border-radius: 6px; overflow: hidden; cursor: pointer; background: none; }
+.thumbs button[aria-current="true"] { border-color: var(--ink); }
+.thumbs img { width: 76px; height: 54px; object-fit: cover; display: block; }
+
+.detail__main { padding: 18px 24px 26px; display: grid; grid-template-columns: minmax(0, 1fr) 240px; gap: 28px; }
+.detail__price { margin: 0; font-size: 30px; font-weight: 800; letter-spacing: -0.03em; color: var(--ink); }
+.detail__price small { font-size: 16px; font-weight: 500; color: var(--muted); letter-spacing: 0; }
+.detail__addr { margin: 2px 0 10px; font-size: 15px; }
+.detail .specs { font-size: 16px; margin-bottom: 18px; }
+.detail h2 { font-size: 17px; margin: 22px 0 8px; color: var(--ink); }
+
+.facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 20px; margin: 0; }
+.facts div { display: flex; justify-content: space-between; gap: 10px; border-bottom: 1px solid var(--line); padding: 6px 0; font-size: 14px; }
+.facts dt { color: var(--muted); }
+.facts dd { margin: 0; font-weight: 600; color: var(--ink); text-align: right; }
+
+.amenities { columns: 2; padding-left: 18px; margin: 0; font-size: 14px; }
+
+.side-card {
+  align-self: start;
+  position: sticky; top: 16px;
+  border: 1.5px solid var(--line);
+  border-radius: 12px;
+  padding: 16px;
+}
+.side-card p { margin: 0 0 12px; font-size: 14px; }
+.side-card .lease { display: inline-block; margin-bottom: 10px; font-size: 13px; }
+.cta {
+  display: block;
+  text-align: center;
+  background: var(--ink);
+  color: #fff;
+  text-decoration: none;
+  font-weight: 700;
+  padding: 11px;
+  border-radius: 10px;
+}
+.cta:hover { background: #22375a; }
+
+/* ── Mobile toggle ─────────────────────────────────────────── */
+.view-toggle { display: none; }
+
+@media (max-width: 900px) {
+  .topbar { padding: 10px 16px; gap: 10px; }
+  .searchbox { flex: 1 1 220px; }
+  .filters { width: 100%; flex-wrap: nowrap; overflow-x: auto; padding-bottom: 2px; scrollbar-width: none; }
+  .filters::-webkit-scrollbar { display: none; }
+  /* Scrolling container would clip absolute panels, so pin them to the viewport. */
+  .panel { position: fixed; top: auto; left: 16px; right: 16px; margin-top: 8px; min-width: 0; }
+  .panel--wide { min-width: 0; }
+
+  .layout { grid-template-columns: minmax(0, 1fr); position: relative; }
+  .list-pane { border-left: 0; padding: 16px 16px 90px; }
+  .layout[data-view="list"] .map-pane { display: none; }
+  .layout[data-view="map"] .list-pane { display: none; }
+  .move-search { left: auto; right: 12px; top: 12px; }
+  .search-area { top: 58px; }
+
+  .view-toggle {
+    display: block;
+    position: fixed;
+    bottom: 20px; left: 50%;
+    transform: translateX(-50%);
+    z-index: 900;
+    border: 0;
+    border-radius: 999px;
+    padding: 10px 26px;
+    background: var(--ink);
+    color: #fff;
+    font-weight: 700;
+    box-shadow: 0 6px 18px -6px rgba(21,35,59,0.6);
+    cursor: pointer;
+  }
+
+  .gallery { height: 240px; grid-template-columns: 1fr; }
+  .gallery__side { display: none; }
+  .detail__main { grid-template-columns: 1fr; padding: 16px; gap: 8px; }
+  .thumbs { padding: 8px 16px 0; }
+  .side-card { position: static; }
+  .facts { grid-template-columns: 1fr; }
+  .amenities { columns: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner, .skeleton .card__photo, .skeleton .bar { animation: none; }
+  .pin span { transition: none; }
+}
